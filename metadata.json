@@ -1,0 +1,7 @@
+{
+  "name": "Metro Agents",
+  "description": "An isometric living city simulation where 55 autonomous agents live, work, elect their mayor, participate in DAO micro-society consensus voting, receive bi-weekly payroll distributions, and power an autonomous Solana sovereign wealth treasury with on-chain execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
