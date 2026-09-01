@@ -1,9 +1,161 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { autonomousSniper } from "./autonomousSniperEngine.js";
 import { HotVaultState, SniperPosition } from "../src/types.js";
 import { fetchLiveSolanaAccountBalances, HOT_VAULT_PUBLIC_KEY } from "./solanaRpc.js";
 import { extractSolanaAddress, scanSolanaToken, formatTelegramTokenScanReport } from "./tokenScanner.js";
 import { metroRemote } from "./metroRemoteControl.js";
+
+// Tool Declarations for Gemini Function Calling
+export const botFunctionDeclarations: FunctionDeclaration[] = [
+  {
+    name: "getLiveSystemStatus",
+    description: "Retrieves current active sniper slots, Hot Vault liquidity, SOL gas balance, and system execution telemetry.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {}
+    }
+  },
+  {
+    name: "executeSnipeTrade",
+    description: "Audits on-chain security and executes a live Solana sniper buy-in into a target token (using symbol or mint address) from the Hot Vault with dynamic trailing stop-loss and PnL management.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        tokenMintOrSymbol: {
+          type: Type.STRING,
+          description: "The Solana token symbol (e.g. OTC, WIF, BONK, CATE) or full Base58 mint address to snipe."
+        },
+        amountUsdc: {
+          type: Type.NUMBER,
+          description: "Amount of USDC to allocate from Hot Vault for this trade (default is 1.00 - 2.50 USD)."
+        }
+      },
+      required: ["tokenMintOrSymbol"]
+    }
+  },
+  {
+    name: "addToWatchlist",
+    description: "Adds a token to the Lead Dev Priority Watchlist to track trailing peak prices and wait for the optimal -6.0% pullback dip entry.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        tokenMintOrSymbol: {
+          type: Type.STRING,
+          description: "Token symbol or Solana mint address"
+        },
+        dipPercentage: {
+          type: Type.NUMBER,
+          description: "Target pullback dip percentage (default is 6.0)"
+        }
+      },
+      required: ["tokenMintOrSymbol"]
+    }
+  },
+  {
+    name: "removeFromWatchlist",
+    description: "Removes a token from the Priority Watchlist.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        tokenMintOrSymbol: {
+          type: Type.STRING,
+          description: "Token symbol or mint address to remove"
+        }
+      },
+      required: ["tokenMintOrSymbol"]
+    }
+  },
+  {
+    name: "setConcurrentSlots",
+    description: "Updates the maximum concurrent sniper runner slot capacity (between 2 and 16 slots).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        slots: {
+          type: Type.NUMBER,
+          description: "Number of maximum concurrent runner slots (2 to 16)"
+        }
+      },
+      required: ["slots"]
+    }
+  },
+  {
+    name: "adjustRiskProfile",
+    description: "Updates sniper dip thresholds, max concurrent slot caps, or execution aggression risk level (CONSERVATIVE, BALANCED, AGGRESSIVE).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        safetyMode: {
+          type: Type.STRING,
+          enum: ["CONSERVATIVE", "BALANCED", "AGGRESSIVE"],
+          description: "The target risk profile: CONSERVATIVE (tight dip -8.5%, 4 slots max), BALANCED (dip -6%, 8-12 slots), AGGRESSIVE (dip -4%, 12-16 slots)"
+        },
+        maxSlots: {
+          type: Type.NUMBER,
+          description: "Max allowed concurrent sniper slots (1-16)"
+        },
+        dipThresholdPercent: {
+          type: Type.NUMBER,
+          description: "Pullback entry dip percentage requirement from trailing peak (e.g. -8.5, -6.0)"
+        }
+      },
+      required: ["safetyMode"]
+    }
+  },
+  {
+    name: "clearAndResetSlots",
+    description: "Wipes all active mock or open positions, resets slots to zero (0/12), and returns all funds safely to Hot Vault.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {}
+    }
+  },
+  {
+    name: "takeProfitAllRunners",
+    description: "Liquidates and harvests profits from all currently open runner slots back to the Hot Vault.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {}
+    }
+  },
+  {
+    name: "triggerEmergencyPanic",
+    description: "Emergency killswitch: liquidates all open runner positions and pauses the scanner daemon immediately.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {}
+    }
+  },
+  {
+    name: "pauseOrResumeScanner",
+    description: "Pauses or resumes the autonomous sniper market scanner loop.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action: {
+          type: Type.STRING,
+          enum: ["PAUSE", "RESUME"],
+          description: "Whether to PAUSE or RESUME the sniper scanner"
+        }
+      },
+      required: ["action"]
+    }
+  },
+  {
+    name: "scanTokenContract",
+    description: "Audits and scans a Solana token contract mint address for honeypots, mint authority, freeze authority, and liquidity depth.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        tokenMint: {
+          type: Type.STRING,
+          description: "Base58 Solana token mint address"
+        }
+      },
+      required: ["tokenMint"]
+    }
+  }
+];
 
 // Multi-turn chat memory per chat ID (kept in-memory, max 20 messages per chat)
 interface ChatMessage {
@@ -200,14 +352,122 @@ FORMATTING GUIDELINES:
       }));
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
+        model: "gemini-2.5-flash",
         contents,
         config: {
           systemInstruction: systemPrompt,
-          temperature: 0.8,
-          topP: 0.95
+          temperature: 0.7,
+          topP: 0.95,
+          tools: [{ functionDeclarations: botFunctionDeclarations }]
         }
       });
+
+      // Handle Tool / Function Calling if emitted by Gemini
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        let toolExecutionSummary = "";
+        for (const call of response.functionCalls) {
+          if (call.name === "getLiveSystemStatus") {
+            const vault = autonomousSniper.getVaultState();
+            const openPos = autonomousSniper.positions.filter(p => p.status === "OPEN");
+            toolExecutionSummary += `📊 <b>System Telemetry:</b> ${openPos.length}/${vault.maxSlots} slots active. Hot Vault: $${vault.freeLiquidityUsdc.toFixed(2)} USDC | ${vault.solBalance.toFixed(4)} SOL. Mode: ${autonomousSniper.safetyMode}.\n`;
+          } else if (call.name === "executeSnipeTrade") {
+            const args = call.args as any;
+            const target = String(args.tokenMintOrSymbol || "").trim();
+            const amount = typeof args.amountUsdc === "number" ? args.amountUsdc : 1.00;
+            
+            // Check if it's already on watchlist
+            const match = metroRemote.devWatchlist.find(t => t.symbol.toLowerCase() === target.toLowerCase() || t.mint === target);
+            if (match) {
+              const snipeRes = autonomousSniper.snipeTargetToken({
+                symbol: match.symbol,
+                name: match.name,
+                mint: match.mint,
+                priceUsd: match.priceUsd
+              }, amount);
+              toolExecutionSummary += snipeRes.success
+                ? `🎯 <b>[SNIPER EXECUTED via NLP ASSISTANT]</b>\n${snipeRes.message}\n`
+                : `⚠️ <b>[SNIPER NOTICE]</b>\n${snipeRes.message}\n`;
+            } else {
+              try {
+                const scan = await scanSolanaToken(target);
+                if (scan.sniperEligibility.qualified) {
+                  const snipeRes = autonomousSniper.snipeTargetToken({
+                    symbol: scan.symbol,
+                    name: scan.name,
+                    mint: scan.mint,
+                    priceUsd: scan.priceUsd
+                  }, amount);
+                  toolExecutionSummary += snipeRes.success
+                    ? `🎯 <b>[SNIPER EXECUTED via NLP ASSISTANT]</b>\n${snipeRes.message}\n`
+                    : `⚠️ <b>[SNIPER NOTICE]</b>\n${snipeRes.message}\n`;
+                } else {
+                  toolExecutionSummary += `🛡️ <b>[SNIPER BLOCKED BY SAFETY SENTINEL]</b>\nMachine rejected trade on $${scan.symbol}: ${scan.sniperEligibility.reason}\n`;
+                }
+                toolExecutionSummary += formatTelegramTokenScanReport(scan) + "\n";
+              } catch (scanErr: any) {
+                toolExecutionSummary += `⚠️ <b>Error scanning token "${target}":</b> ${scanErr.message}\n`;
+              }
+            }
+          } else if (call.name === "addToWatchlist") {
+            const args = call.args as any;
+            const target = String(args.tokenMintOrSymbol || "").trim();
+            const dip = typeof args.dipPercentage === "number" ? args.dipPercentage : 6.0;
+            const res = await metroRemote.addTrackToken(target);
+            if (res.success && dip !== 6.0) {
+              metroRemote.adjustDipPercentage(target, dip);
+            }
+            toolExecutionSummary += `⭐ <b>[PRIORITY WATCHLIST]</b> ${res.message} (Target Dip: -${dip}%)\n`;
+          } else if (call.name === "removeFromWatchlist") {
+            const args = call.args as any;
+            const target = String(args.tokenMintOrSymbol || "").trim();
+            const res = metroRemote.untrackToken(target);
+            toolExecutionSummary += `🗑️ ${res.message}\n`;
+          } else if (call.name === "setConcurrentSlots") {
+            const args = call.args as any;
+            const slots = Math.max(2, Math.min(16, parseInt(args.slots, 10) || 12));
+            autonomousSniper.maxSlots = slots;
+            toolExecutionSummary += `⚙️ <b>Max concurrent runner slots set to ${slots}!</b>\n`;
+          } else if (call.name === "triggerEmergencyPanic") {
+            const res = autonomousSniper.panicStop();
+            toolExecutionSummary += `🚨 <b>[EMERGENCY PANIC KILLSWITCH TRIGGERED]</b>\n${res.message}\n`;
+          } else if (call.name === "adjustRiskProfile") {
+            const args = call.args as any;
+            const res = autonomousSniper.updateRiskSettings(args);
+            toolExecutionSummary += `🛡️ <b>Risk Profile Updated:</b> ${res.message}\n`;
+          } else if (call.name === "clearAndResetSlots") {
+            const res = autonomousSniper.clearAllSlots();
+            toolExecutionSummary += `🧹 <b>Slots Purged:</b> ${res.message}\n`;
+          } else if (call.name === "takeProfitAllRunners") {
+            const res = autonomousSniper.takeProfitAll();
+            toolExecutionSummary += `🌾 <b>Harvest Complete:</b> ${res.message}\n`;
+          } else if (call.name === "pauseOrResumeScanner") {
+            const args = call.args as any;
+            if (args.action === "PAUSE") {
+              const res = autonomousSniper.pauseScanner();
+              toolExecutionSummary += `⏸️ <b>Scanner Paused:</b> ${res.message}\n`;
+            } else {
+              const res = autonomousSniper.resumeScanner();
+              toolExecutionSummary += `▶️ <b>Scanner Resumed:</b> ${res.message}\n`;
+            }
+          } else if (call.name === "scanTokenContract") {
+            const args = call.args as any;
+            if (args.tokenMint) {
+              const scan = await scanSolanaToken(args.tokenMint);
+              toolExecutionSummary += formatTelegramTokenScanReport(scan) + "\n";
+            }
+          }
+        }
+
+        const replyText = response.text ? `${response.text}\n\n${toolExecutionSummary}`.trim() : toolExecutionSummary.trim();
+        if (replyText) {
+          history.push({
+            role: "model",
+            text: replyText,
+            timestamp: Date.now()
+          });
+          return cleanMarkdownForTelegramHtml(replyText);
+        }
+      }
 
       const replyText = response.text?.trim();
       if (replyText) {
@@ -246,6 +506,33 @@ function generateIntelligentFallbackReply(
   const freeUsdc = Number(vault.freeLiquidityUsdc ?? autonomousSniper.hotVaultUsdcBalance ?? 25.00);
   const otcBurnedCount = Math.round((vault.otcBuybacksUsdc ?? autonomousSniper.otcBuybacksUsdc ?? 9.22) / 0.000045);
   const openPos = autonomousSniper.positions.filter(p => p.status === "OPEN");
+
+  if (lower.includes("panic") || lower.includes("emergency stop") || lower.includes("dump all") || lower.includes("liquidate all")) {
+    const res = autonomousSniper.panicStop();
+    return `🚨 <b>[EMERGENCY PANIC KILLSWITCH TRIGGERED]</b>\n${res.message}\n\nAll open positions liquidated back to Hot Vault USDC and scanner halted.`;
+  }
+
+  if (lower.includes("take profit all") || lower.includes("harvest all") || lower.includes("close all runners") || lower.includes("harvest profits")) {
+    const res = autonomousSniper.takeProfitAll();
+    return `🌾 <b>[HARVEST COMPLETE]</b>\n${res.message}\n\nProfits banked and capital recycled to Hot Vault.`;
+  }
+
+  if (lower.includes("pause scanner") || lower.includes("stop scanner") || lower.includes("halt scanner")) {
+    const res = autonomousSniper.pauseScanner();
+    return `⏸️ <b>[SCANNER PAUSED]</b>\n${res.message}`;
+  }
+
+  if (lower.includes("resume scanner") || lower.includes("start scanner") || lower.includes("enable scanner")) {
+    const res = autonomousSniper.resumeScanner();
+    return `▶️ <b>[SCANNER RESUMED]</b>\n${res.message}`;
+  }
+
+  const slotMatch = lower.match(/(?:set|change|adjust)\s+slots?\s+(?:to\s+)?(\d+)/i);
+  if (slotMatch && slotMatch[1]) {
+    const slots = Math.max(2, Math.min(16, parseInt(slotMatch[1], 10)));
+    autonomousSniper.maxSlots = slots;
+    return `⚙️ <b>[CONCURRENT RUNNER SLOTS UPDATED]</b>\nMax sniper concurrency set to <b>${slots} slots</b>.`;
+  }
 
   if (lower.includes("when") && (lower.includes("buy") || lower.includes("perfect") || lower.includes("time") || lower.includes("dip") || lower.includes("entry")) || lower.includes("6%") || lower.includes("pullback") || lower.includes("uptrend") || lower.includes("trail") || lower.includes("cate") || lower.includes("bullshit") || lower.includes("jitosol")) {
     const list = metroRemote.getWatchlist();

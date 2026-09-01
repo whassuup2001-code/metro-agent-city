@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState, useMemo } from "react";
+import React, { useEffect, useRef, useState, useMemo, memo } from "react";
 import { SniperPosition, HotVaultState, TradeReceipt } from "./types.js";
+import { useSafeTelemetry } from "./hooks/useSafeTelemetry.js";
 import { 
   Zap, 
   ShieldCheck, 
@@ -82,6 +83,26 @@ export function App() {
   const [coordinates, setCoordinates] = useState({ x: 438.5, y: 829.2, z: 0.40, rotation: 0, population: 90 });
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const zoomRef = useRef<number>(0.85);
+  const panOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 30 });
+  const weatherRef = useRef<"thunderstorm" | "clear" | "neon_night">("thunderstorm");
+  const selectedBuildingRef = useRef<Building | null>(null);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    panOffsetRef.current = panOffset;
+  }, [panOffset]);
+
+  useEffect(() => {
+    weatherRef.current = weather;
+  }, [weather]);
+
+  useEffect(() => {
+    selectedBuildingRef.current = selectedBuilding;
+  }, [selectedBuilding]);
 
   // Generate the Master Isometric Metropolis Map (32x32 Grid)
   const mapData = useMemo(() => {
@@ -230,34 +251,16 @@ export function App() {
     if (bridge) setSelectedBuilding(bridge);
   }, [mapData]);
 
-  // Poll server state
+  // Bulletproof safe telemetry hook
+  const safeTelemetry = useSafeTelemetry();
+
   useEffect(() => {
-    let isMounted = true;
-    const fetchState = async () => {
-      try {
-        const res = await fetch("/api/sniper/status", {
-          headers: { "Accept": "application/json" }
-        });
-        if (!res.ok) return;
-        const contentType = res.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) return;
-        const data = await res.json();
-        if (data.success && isMounted) {
-          setVault(data.vault);
-          setPositions(data.positions || []);
-          setReceipts(data.receipts || []);
-        }
-      } catch (err) {
-        // Silently catch
-      }
-    };
-    fetchState();
-    const interval = setInterval(fetchState, 2000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+    if (safeTelemetry && safeTelemetry.success) {
+      if (safeTelemetry.vault) setVault(safeTelemetry.vault);
+      if (Array.isArray(safeTelemetry.positions)) setPositions(safeTelemetry.positions);
+      if (Array.isArray(safeTelemetry.receipts)) setReceipts(safeTelemetry.receipts);
+    }
+  }, [safeTelemetry]);
 
   // Main 3D Isometric Rendering Loop
   useEffect(() => {
@@ -267,6 +270,14 @@ export function App() {
     if (!ctx) return;
 
     let animId: number;
+
+    const handleResize = () => {
+      if (!canvas) return;
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
 
     // Rain particles
     const rainDrops: { x: number; y: number; length: number; speed: number }[] = [];
@@ -287,21 +298,27 @@ export function App() {
       { id: "v4", x: 30, y: 25, targetX: 0, targetY: 25, color: "#4ade80", speed: 0.06 },
     ];
 
-    const tileWidth = 42 * zoom;
-    const tileHeight = 21 * zoom;
-    const originX = canvas.width / 2 + panOffset.x;
-    const originY = canvas.height / 2 - 120 + panOffset.y;
-
-    const toScreen = (gx: number, gy: number) => {
-      const sx = originX + (gx - gy) * (tileWidth / 2);
-      const sy = originY + (gx + gy) * (tileHeight / 2);
-      return { x: sx, y: sy };
-    };
-
+    const sorted = [...mapData].sort((a, b) => (a.gridX + a.gridY) - (b.gridX + b.gridY));
     let tick = 0;
 
     const render = () => {
       tick++;
+      const currentZoom = zoomRef.current;
+      const currentPan = panOffsetRef.current;
+      const currentWeather = weatherRef.current;
+      const currentSelected = selectedBuildingRef.current;
+
+      const tileWidth = 42 * currentZoom;
+      const tileHeight = 21 * currentZoom;
+      const originX = canvas.width / 2 + currentPan.x;
+      const originY = canvas.height / 2 - 120 + currentPan.y;
+
+      const toScreen = (gx: number, gy: number) => {
+        const sx = originX + (gx - gy) * (tileWidth / 2);
+        const sy = originY + (gx + gy) * (tileHeight / 2);
+        return { x: sx, y: sy };
+      };
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // 1. Deep Space Atmosphere Background
@@ -337,12 +354,10 @@ export function App() {
       }
 
       // 3. Render 3D Buildings & Infrastructure with Isometric Depth Sorting
-      const sorted = [...mapData].sort((a, b) => (a.gridX + a.gridY) - (b.gridX + b.gridY));
-
       for (const b of sorted) {
         const { x: sx, y: sy } = toScreen(b.gridX, b.gridY);
-        const bh = b.height * zoom;
-        const isSelected = selectedBuilding?.id === b.id;
+        const bh = b.height * currentZoom;
+        const isSelected = currentSelected?.id === b.id;
 
         if (b.type === "water") {
           // Water tile
@@ -396,7 +411,7 @@ export function App() {
 
           // Tree trunk & leafy canopy
           ctx.beginPath();
-          ctx.arc(sx, sy + 6, 6 * zoom, 0, Math.PI * 2);
+          ctx.arc(sx, sy + 6, 6 * currentZoom, 0, Math.PI * 2);
           ctx.fillStyle = "#22c55e";
           ctx.fill();
           continue;
@@ -448,11 +463,11 @@ export function App() {
           const windowCount = Math.floor(bh / 14);
           ctx.fillStyle = b.glowColor;
           for (let w = 1; w <= windowCount; w++) {
-            const wy = sy + tileHeight - (w * 12 * zoom);
+            const wy = sy + tileHeight - (w * 12 * currentZoom);
             if ((w + tick) % 5 !== 0) {
-              ctx.fillRect(sx - 7 * zoom, wy, 2 * zoom, 2 * zoom);
-              ctx.fillRect(sx - 2 * zoom, wy + 2 * zoom, 2 * zoom, 2 * zoom);
-              ctx.fillRect(sx + 4 * zoom, wy + 1 * zoom, 2 * zoom, 2 * zoom);
+              ctx.fillRect(sx - 7 * currentZoom, wy, 2 * currentZoom, 2 * currentZoom);
+              ctx.fillRect(sx - 2 * currentZoom, wy + 2 * currentZoom, 2 * currentZoom, 2 * currentZoom);
+              ctx.fillRect(sx + 4 * currentZoom, wy + 1 * currentZoom, 2 * currentZoom, 2 * currentZoom);
             }
           }
         }
@@ -461,7 +476,7 @@ export function App() {
         if (b.height > 65) {
           ctx.beginPath();
           ctx.moveTo(sx, sy - bh);
-          ctx.lineTo(sx, sy - bh - 16 * zoom);
+          ctx.lineTo(sx, sy - bh - 16 * currentZoom);
           ctx.strokeStyle = "#f43f5e";
           ctx.lineWidth = 1.5;
           ctx.stroke();
@@ -469,7 +484,7 @@ export function App() {
           // Blinking Beacon
           if (tick % 30 < 15) {
             ctx.beginPath();
-            ctx.arc(sx, sy - bh - 16 * zoom, 2.5, 0, Math.PI * 2);
+            ctx.arc(sx, sy - bh - 16 * currentZoom, 2.5, 0, Math.PI * 2);
             ctx.fillStyle = "#f43f5e";
             ctx.fill();
           }
@@ -482,7 +497,7 @@ export function App() {
         if (v.y > 31) v.y = 0;
         const { x: vx, y: vy } = toScreen(v.x, v.y);
         ctx.beginPath();
-        ctx.arc(vx, vy + 4, 3.5 * zoom, 0, Math.PI * 2);
+        ctx.arc(vx, vy + 4, 3.5 * currentZoom, 0, Math.PI * 2);
         ctx.fillStyle = v.color;
         ctx.fill();
         ctx.strokeStyle = "#ffffff";
@@ -491,7 +506,7 @@ export function App() {
       }
 
       // 5. Thunderstorm Rain Particle Effect
-      if (weather === "thunderstorm") {
+      if (currentWeather === "thunderstorm") {
         ctx.strokeStyle = "rgba(170, 200, 235, 0.35)";
         ctx.lineWidth = 1.2;
         for (const drop of rainDrops) {
@@ -512,19 +527,12 @@ export function App() {
       animId = requestAnimationFrame(render);
     };
 
-    const handleResize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    handleResize();
-    window.addEventListener("resize", handleResize);
-
     render();
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", handleResize);
     };
-  }, [mapData, zoom, panOffset, weather, selectedBuilding]);
+  }, [mapData]);
 
   // Handle Canvas Drag / Pan
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -898,9 +906,9 @@ export function App() {
               </div>
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  AUTONOMOUS SNIPER ENGINE <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono">100% AUTONOMOUS</span>
+                  AUTONOMOUS SNIPER ENGINE <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono">PUBLIC_INVESTOR_SHOWCASE</span>
                 </h2>
-                <p className="text-xs text-slate-400">Real-Time On-Chain Profit Compounding • 1-Token-1-Slot Diversity Guard</p>
+                <p className="text-xs text-slate-400">Read-Only Telemetry Mirror • Upstream Authority: Local Daemon Feed</p>
               </div>
             </div>
 
@@ -913,22 +921,28 @@ export function App() {
           </div>
 
           {/* Metrics summary banner */}
-          <div className="grid grid-cols-4 gap-3 py-4 border-b border-slate-800">
+          <div className="grid grid-cols-5 gap-3 py-4 border-b border-slate-800">
             <div className="bg-[#121c2e] p-3 rounded-xl border border-slate-800">
-              <span className="text-xs text-slate-400 block">Hot Vault Balance</span>
-              <span className="text-lg font-bold font-mono text-emerald-400">${vault?.usdcBalance.toFixed(2) || "23.80"} USDC</span>
+              <span className="text-xs text-slate-400 block">Slot Allocation</span>
+              <span className="text-lg font-bold font-mono text-white">
+                {positions.length} / {vault?.maxSlots || 12} <span className="text-xs text-emerald-400 font-normal">({Math.max(0, (vault?.maxSlots || 12) - positions.length)} Avail)</span>
+              </span>
+            </div>
+            <div className="bg-[#121c2e] p-3 rounded-xl border border-slate-800">
+              <span className="text-xs text-slate-400 block">Hot Vault (Public)</span>
+              <span className="text-lg font-bold font-mono text-emerald-400">${vault?.usdcBalance?.toFixed(2) || "0.00"} USDC</span>
             </div>
             <div className="bg-[#121c2e] p-3 rounded-xl border border-slate-800">
               <span className="text-xs text-slate-400 block">Free Liquidity</span>
-              <span className="text-lg font-bold font-mono text-white">${vault?.freeLiquidityUsdc.toFixed(2) || "18.05"} USDC</span>
+              <span className="text-lg font-bold font-mono text-white">${vault?.freeLiquidityUsdc?.toFixed(2) || "0.00"} USDC</span>
             </div>
             <div className="bg-[#121c2e] p-3 rounded-xl border border-slate-800">
-              <span className="text-xs text-slate-400 block">Sinking Fund (40%)</span>
-              <span className="text-lg font-bold font-mono text-indigo-400">${vault?.sinkingFundReservesUsdc.toFixed(2) || "15.60"} USDC</span>
+              <span className="text-xs text-slate-400 block">Sinking Fund OTC</span>
+              <span className="text-lg font-bold font-mono text-indigo-400">40% Share</span>
             </div>
             <div className="bg-[#121c2e] p-3 rounded-xl border border-slate-800">
-              <span className="text-xs text-slate-400 block">Total Profits Harvested</span>
-              <span className="text-lg font-bold font-mono text-emerald-300">+${vault?.totalProfitsHarvestedUsdc.toFixed(2) || "39.00"} USDC</span>
+              <span className="text-xs text-slate-400 block">SOL Reserve Health</span>
+              <span className="text-lg font-bold font-mono text-emerald-300">OPTIMAL</span>
             </div>
           </div>
 
@@ -936,39 +950,56 @@ export function App() {
           <div className="flex-1 py-4 overflow-y-auto">
             <div className="flex items-center justify-between pb-3">
               <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Active Dynamic Runner Slots ({positions.length}/{vault?.maxSlots || 6})
+                Runner Slots Matrix (Max: {vault?.maxSlots || 12} • Filled: {positions.length} • Available: {Math.max(0, (vault?.maxSlots || 12) - positions.length)})
               </h3>
-              <span className="text-xs text-emerald-400 font-mono">4s Machine Heartbeat</span>
+              <span className="text-xs text-emerald-400 font-mono">Live Telemetry Feed</span>
             </div>
 
-            <div className="grid grid-cols-3 gap-3.5">
-              {positions.map((pos, idx) => (
-                <div key={pos.id} className="bg-[#121c2e] border border-slate-800 hover:border-slate-700 rounded-xl p-4 flex flex-col justify-between transition">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-400">
+            {positions.length > 0 ? (
+              <div className="grid grid-cols-3 gap-3.5">
+                {positions.map((pos, idx) => (
+                  <div key={pos.id} className="bg-[#121c2e] border border-slate-800 hover:border-slate-700 rounded-xl p-4 flex flex-col justify-between transition">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-400">
+                        SLOT #{idx + 1}
+                      </span>
+                      <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
+                        pos.currentPnlPercent >= 0 ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"
+                      }`}>
+                        {pos.currentPnlPercent >= 0 ? "+" : ""}{pos.currentPnlPercent.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="py-3">
+                      <h4 className="text-lg font-bold text-white font-mono">${pos.tokenSymbol}</h4>
+                      <span className="text-xs text-slate-400 font-mono">${pos.allocatedUsdc.toFixed(2)} USDC Allocated</span>
+                    </div>
+
+                    <div className="text-[11px] text-slate-400 border-t border-slate-800/80 pt-2 flex justify-between font-mono">
+                      <span className="flex items-center gap-1 text-emerald-400">
+                        <Activity className="w-3 h-3 animate-spin" /> Trailing Ratchet
+                      </span>
+                      <span>Peak: +{pos.highestPnlSeen.toFixed(1)}%</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-4 gap-3">
+                {Array.from({ length: vault?.maxSlots || 12 }).map((_, idx) => (
+                  <div key={idx} className="bg-[#121c2e]/60 border border-dashed border-slate-800 rounded-xl p-4 flex flex-col justify-between items-center text-center">
+                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-900 text-slate-500">
                       SLOT #{idx + 1}
                     </span>
-                    <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
-                      pos.currentPnlPercent >= 0 ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"
-                    }`}>
-                      {pos.currentPnlPercent >= 0 ? "+" : ""}{pos.currentPnlPercent.toFixed(1)}%
-                    </span>
+                    <div className="py-4">
+                      <span className="text-xs font-mono font-bold text-emerald-400 block">AVAILABLE</span>
+                      <span className="text-[10px] text-slate-500 font-mono">Ready for Local Stream</span>
+                    </div>
+                    <span className="text-[10px] text-slate-600 font-mono">Unallocated</span>
                   </div>
-
-                  <div className="py-3">
-                    <h4 className="text-lg font-bold text-white font-mono">${pos.tokenSymbol}</h4>
-                    <span className="text-xs text-slate-400 font-mono">${pos.allocatedUsdc.toFixed(2)} USDC Allocated</span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-400 border-t border-slate-800/80 pt-2 flex justify-between font-mono">
-                    <span className="flex items-center gap-1 text-emerald-400">
-                      <Activity className="w-3 h-3 animate-spin" /> Trailing Ratchet
-                    </span>
-                    <span>Peak: +{pos.highestPnlSeen.toFixed(1)}%</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

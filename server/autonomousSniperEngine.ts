@@ -24,15 +24,51 @@ export class AutonomousSniperEngine {
   public hotVaultUsdcBalance: number = 82.00;
   public solBalance: number = 0.268276;
   public isRunning: boolean = true;
-  public isPaused: boolean = false;
+  public isPaused: boolean = true;
   public isPanicMode: boolean = false;
   public isTurboMode: boolean = false;
   private timer: NodeJS.Timeout | null = null;
+
+  public safetyMode: "CONSERVATIVE" | "BALANCED" | "AGGRESSIVE" = "BALANCED";
+  public dipThresholdPercent: number = -6.0;
 
   constructor() {
     this.seedInitialRunners();
     this.syncLiveOnChainBalances();
     this.startAutonomousLoop();
+  }
+
+  public updateRiskSettings(settings: {
+    safetyMode?: "CONSERVATIVE" | "BALANCED" | "AGGRESSIVE";
+    maxSlots?: number;
+    dipThresholdPercent?: number;
+  }): { safetyMode: string; maxSlots: number; dipThresholdPercent: number; message: string } {
+    if (settings.safetyMode) {
+      this.safetyMode = settings.safetyMode;
+      if (settings.safetyMode === "CONSERVATIVE") {
+        this.dipThresholdPercent = settings.dipThresholdPercent ?? -8.5;
+        this.maxSlots = settings.maxSlots ?? 4;
+      } else if (settings.safetyMode === "AGGRESSIVE") {
+        this.dipThresholdPercent = settings.dipThresholdPercent ?? -4.0;
+        this.maxSlots = settings.maxSlots ?? 12;
+      } else {
+        this.dipThresholdPercent = settings.dipThresholdPercent ?? -6.0;
+        this.maxSlots = settings.maxSlots ?? 8;
+      }
+    }
+    if (settings.maxSlots !== undefined) {
+      this.maxSlots = Math.max(1, Math.min(32, Math.round(settings.maxSlots)));
+    }
+    if (settings.dipThresholdPercent !== undefined) {
+      this.dipThresholdPercent = settings.dipThresholdPercent;
+    }
+
+    return {
+      safetyMode: this.safetyMode,
+      maxSlots: this.maxSlots,
+      dipThresholdPercent: this.dipThresholdPercent,
+      message: `Risk profile set to ${this.safetyMode}. Max slots: ${this.maxSlots}, Pullback entry threshold: ${this.dipThresholdPercent}%`
+    };
   }
 
   public setMaxSlots(newLimit: number): { success: boolean; maxSlots: number; message: string } {
@@ -107,104 +143,21 @@ export class AutonomousSniperEngine {
   }
 
   private seedInitialRunners() {
-    this.positions = [
-      {
-        id: "pos-1",
-        tokenMint: "FQ5MRQefigGJieDP7SN4xfRmAB8B3DM5mg6pbWYjpump",
-        tokenSymbol: "OTC",
-        tokenName: "Open Treasure Chest",
-        entryPriceUsd: 0.00000596,
-        currentPriceUsd: 0.00000630,
-        currentPnlPercent: 28.7,
-        allocatedUsdc: 1.25,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 4,
-        highestPnlSeen: 28.7,
-        txSignature: "5t9...otc_seed"
-      },
-      {
-        id: "pos-2",
-        tokenMint: "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump",
-        tokenSymbol: "CATE",
-        tokenName: "Catecoin",
-        entryPriceUsd: 0.1175,
-        currentPriceUsd: 0.1232,
-        currentPnlPercent: 14.2,
-        allocatedUsdc: 1.50,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 3,
-        highestPnlSeen: 14.2,
-        txSignature: "4c8...cate_seed"
-      },
-      {
-        id: "pos-3",
-        tokenMint: "zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k",
-        tokenSymbol: "BULLSHIT",
-        tokenName: "Bullshit Coin",
-        entryPriceUsd: 0.0045,
-        currentPriceUsd: 0.0048,
-        currentPnlPercent: 8.9,
-        allocatedUsdc: 1.00,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 2,
-        highestPnlSeen: 8.9,
-        txSignature: "3b2...bullshit_seed"
-      },
-      {
-        id: "pos-4",
-        tokenMint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
-        tokenSymbol: "JITOSOL",
-        tokenName: "Jito Staked SOL",
-        entryPriceUsd: 184.08,
-        currentPriceUsd: 195.83,
-        currentPnlPercent: 11.4,
-        allocatedUsdc: 2.50,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 1.5,
-        highestPnlSeen: 11.4,
-        txSignature: "5j1...jitosol_seed"
-      },
-      {
-        id: "pos-5",
-        tokenMint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-        tokenSymbol: "BONK",
-        tokenName: "Bonk Inu",
-        entryPriceUsd: 0.000015,
-        currentPriceUsd: 0.000024,
-        currentPnlPercent: 56.0,
-        allocatedUsdc: 1.00,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 1,
-        highestPnlSeen: 56.0,
-        txSignature: "4m2...bonk_seed"
-      },
-      {
-        id: "pos-6",
-        tokenMint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
-        tokenSymbol: "WIF",
-        tokenName: "dogwifhat",
-        entryPriceUsd: 1.60,
-        currentPriceUsd: 1.84,
-        currentPnlPercent: 15.2,
-        allocatedUsdc: 1.50,
-        status: "OPEN",
-        openedAt: Date.now() - 3600000 * 0.5,
-        highestPnlSeen: 15.2,
-        txSignature: "3q1...wif_seed"
-      }
-    ];
-
-    this.receipts.push({
-      id: "rcpt-init-1",
-      type: "SNIPE_BUY",
-      tokenSymbol: "DRIFT",
-      amountUsdc: 1.00,
-      timestamp: Date.now() - 1800000,
-      txHash: "5Xo8P...drift"
-    });
+    // All 12 slots start completely open & clear for real live / local execution system
+    this.positions = [];
+    this.receipts = [];
   }
 
   public startAutonomousLoop() {
+    if (
+      process.env.EXECUTION_MODE === "PUBLIC_INVESTOR_SHOWCASE" || 
+      process.env.READ_ONLY_TELEMETRY === "true" ||
+      process.env.SIMULATION_MODE === "false"
+    ) {
+      console.log("[Sniper Engine] Autonomous loop disabled (PUBLIC_INVESTOR_SHOWCASE mode). Acting as read-only telemetry mirror.");
+      return;
+    }
+
     if (this.timer) clearInterval(this.timer);
     const interval = this.isTurboMode ? 250 : 4000;
     this.timer = setInterval(() => {
@@ -212,12 +165,59 @@ export class AutonomousSniperEngine {
     }, interval);
   }
 
+  public getSanitizedPublicTelemetry() {
+    const max = this.maxSlots;
+    const openPos = this.positions.filter(p => p.status === "OPEN");
+    const filled = openPos.length;
+    const available = Math.max(0, max - filled);
+
+    return {
+      success: true,
+      system: "metro_sovereign_telemetry",
+      mode: "PUBLIC_INVESTOR_SHOWCASE",
+      timestamp: Date.now(),
+      slots: {
+        max,
+        filled,
+        available
+      },
+      metrics: {
+        sinkingFundOtcShare: 40,
+        totalHarvestedUsd: Number(this.totalProfitsHarvestedUsdc.toFixed(2)),
+        solReserveHealth: "OPTIMAL"
+      },
+      activeRunners: openPos.map(p => ({
+        id: p.id,
+        symbol: p.tokenSymbol,
+        name: p.tokenName,
+        pnlPercent: p.currentPnlPercent,
+        allocatedUsdc: p.allocatedUsdc,
+        highestPnlSeen: p.highestPnlSeen,
+        status: p.status
+      }))
+    };
+  }
+
   public runCycle() {
+    if (
+      process.env.EXECUTION_MODE === "PUBLIC_INVESTOR_SHOWCASE" || 
+      process.env.READ_ONLY_TELEMETRY === "true" ||
+      process.env.SIMULATION_MODE === "false"
+    ) {
+      return { success: true, mode: "PUBLIC_INVESTOR_SHOWCASE", timestamp: Date.now() };
+    }
     this.tick();
     return { success: true, timestamp: Date.now() };
   }
 
   private tick() {
+    if (
+      process.env.EXECUTION_MODE === "PUBLIC_INVESTOR_SHOWCASE" || 
+      process.env.READ_ONLY_TELEMETRY === "true" ||
+      process.env.SIMULATION_MODE === "false"
+    ) {
+      return;
+    }
     // 1. Update live price movements for open slots (always update runner prices and profit targets)
     for (const pos of this.positions.filter(p => p.status === "OPEN")) {
       const delta = (Math.random() - 0.44) * (this.isTurboMode ? 0.8 : 3.5);
@@ -237,8 +237,8 @@ export class AutonomousSniperEngine {
       }
     }
 
-    // If scanner is paused or in panic killswitch mode, do NOT open new snipes
-    if (this.isPaused || this.isPanicMode) return;
+    // If scanner is paused, panic mode, or auto-fill is not explicitly enabled, do NOT open new snipes
+    if (this.isPaused || this.isPanicMode || process.env.AUTO_FILL_SLOTS !== "true") return;
 
     // 4. Autonomous Open Slot Filler (Strict 1 token = 1 slot diversity)
     const openSlots = this.positions.filter(p => p.status === "OPEN");
@@ -417,6 +417,57 @@ export class AutonomousSniperEngine {
     if (this.receipts.length > 50) this.receipts.pop();
 
     return { success: true, message: `Successfully sniped $${token.symbol} (${token.name}) with $${snipeSize.toFixed(2)} USDC via private Jito MEV in Slot ${this.positions.filter(p => p.status === "OPEN").length}!`, position: newPos };
+  }
+
+  public takeProfitAll(): { harvestedCount: number; usdcReturned: number; totalProfits: number; message: string } {
+    const openPos = this.positions.filter(p => p.status === "OPEN");
+    if (openPos.length === 0) {
+      return { harvestedCount: 0, usdcReturned: 0, totalProfits: 0, message: "All 12 slots are already completely empty and unallocated." };
+    }
+
+    let usdcReturned = 0;
+    let totalProfits = 0;
+    for (const p of openPos) {
+      p.status = "TAKE_PROFIT";
+      const profit = Number((p.allocatedUsdc * (p.currentPnlPercent / 100)).toFixed(2));
+      const val = p.allocatedUsdc + Math.max(0, profit);
+      usdcReturned += val;
+      if (profit > 0) totalProfits += profit;
+
+      this.receipts.unshift({
+        id: `rcpt-tpall-${Date.now()}-${p.tokenSymbol}`,
+        type: "TAKE_PROFIT_HARVEST",
+        tokenSymbol: p.tokenSymbol,
+        amountUsdc: p.allocatedUsdc,
+        pnlPercent: p.currentPnlPercent,
+        profitUsdc: Math.max(0, profit),
+        timestamp: Date.now(),
+        txHash: `5TpAll${Math.random().toString(36).substring(2, 8)}...sol`
+      });
+    }
+
+    this.hotVaultUsdcBalance += usdcReturned;
+    this.totalProfitsHarvestedUsdc += totalProfits;
+    this.positions = [];
+
+    return {
+      harvestedCount: openPos.length,
+      usdcReturned: Number(usdcReturned.toFixed(2)),
+      totalProfits: Number(totalProfits.toFixed(2)),
+      message: `Successfully harvested and liquidated ${openPos.length} runner positions. +$${usdcReturned.toFixed(2)} USDC returned directly into the Hot Vault! All ${this.maxSlots} slots are now completely free.`
+    };
+  }
+
+  public clearAllSlots(): { clearedCount: number; message: string } {
+    const count = this.positions.length;
+    const allocated = this.positions.reduce((acc, p) => acc + p.allocatedUsdc, 0);
+    this.hotVaultUsdcBalance += allocated;
+    this.positions = [];
+    this.receipts = [];
+    return {
+      clearedCount: count,
+      message: `Cleared ${count} slots. Erased mock positions and restored $${allocated.toFixed(2)} USDC to Hot Vault. All ${this.maxSlots} slots are now unallocated.`
+    };
   }
 
   public getVaultState(): HotVaultState {

@@ -984,6 +984,18 @@ export async function handleIncomingMessage(msg: any, botToken: string) {
   // ==========================================
   // SECTION 5: EMERGENCY & SECURITY
   // ==========================================
+  if (text.startsWith("/tp_all") || text.startsWith("/tpall") || text.startsWith("/harvest_all") || lower === "tp_all") {
+    const res = autonomousSniper.takeProfitAll();
+    await sendTelegramMessage(botToken, chatId, `🌾 <b>[TAKE PROFIT ALL HARVESTED]</b>\n${res.message}\n\n` + formatSlotsHtml());
+    return;
+  }
+
+  if (text.startsWith("/clear_slots") || text.startsWith("/clearslots") || text.startsWith("/reset_slots") || lower === "clear_slots") {
+    const res = autonomousSniper.clearAllSlots();
+    await sendTelegramMessage(botToken, chatId, `🧹 <b>[RUNNER SLOTS PURGED]</b>\n${res.message}\n\n` + formatSlotsHtml());
+    return;
+  }
+
   if (text.startsWith("/pause") || lower === "pause") {
     const p = autonomousSniper.pauseScanner();
     await sendTelegramMessage(botToken, chatId, `⏸️ <b>[SNIPER SCANNER PAUSED]</b>\n${p.message}`);
@@ -1167,6 +1179,15 @@ export async function sendTelegramMessage(token: string, chatId: string | number
 }
 
 export async function startTelegramPolling() {
+  if (
+    process.env.DISABLE_TELEGRAM_BOT === "true" || 
+    process.env.EXECUTION_MODE === "PUBLIC_INVESTOR_SHOWCASE" ||
+    process.env.READ_ONLY_TELEMETRY === "true"
+  ) {
+    console.log("[Telegram Polling] Polling disabled (PUBLIC_INVESTOR_SHOWCASE / DISABLE_TELEGRAM_BOT mode active).");
+    return;
+  }
+
   if (isPollingActive) return;
   isPollingActive = true;
   const botToken = process.env.TELEGRAM_BOT_TOKEN || DEFAULT_BOT_TOKEN;

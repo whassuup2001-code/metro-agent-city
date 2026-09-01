@@ -13,10 +13,12 @@
     "@google/genai": "^2.19.0",
     "@phantom/react-sdk": "^2.0.2",
     "@solana/web3.js": "^1.95.8",
+    "@types/cors": "^2.8.19",
     "@types/node": "^22.13.4",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "clsx": "^2.1.1",
+    "cors": "^2.8.6",
     "express": "^4.21.2",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
@@ -26,6 +28,7 @@
     "vite": "^6.1.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "esbuild": "^0.28.2",
